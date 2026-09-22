@@ -1,0 +1,235 @@
+---
+# Docker Compose for PORTAL (Authentik) - Local Development & Testing
+# Usage: docker-compose -f docker-compose-portal.yaml up -d
+# Access: http://localhost:9000
+
+version: '3.8'
+
+services:
+  # PostgreSQL Database
+  postgres:
+    image: postgres:16-alpine
+    container_name: portal-postgres
+    restart: always
+    environment:
+      POSTGRES_USER: authentik
+      POSTGRES_PASSWORD: ${DB_PASSWORD:-SuperSecurePassword123!}
+      POSTGRES_DB: authentik
+      POSTGRES_INITDB_ARGS: "--encoding=UTF8 --locale=en_US.UTF-8"
+    volumes:
+      - postgres-data:/var/lib/postgresql/data
+      - ./scripts/init-db.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    networks:
+      - portal-network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U authentik -d authentik"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "5432:5432"
+    environment:
+      PGDATA: /var/lib/postgresql/data/pgdata
+
+  # Redis Cache
+  redis:
+    image: redis:7-alpine
+    container_name: portal-redis
+    restart: always
+    command: redis-server --requirepass ${REDIS_PASSWORD:-RedisPassword123!}
+    volumes:
+      - redis-data:/data
+    networks:
+      - portal-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    ports:
+      - "6379:6379"
+
+  # Authentik Server
+  authentik-server:
+    image: ghcr.io/goauthentik/server:${AUTHENTIK_VERSION:-latest}
+    container_name: portal-server
+    restart: always
+    command: server
+    environment:
+      # Core
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:-SuperSecretKey123!Change-In-Production!}
+      AUTHENTIK_POSTGRESQL__HOST: postgres
+      AUTHENTIK_POSTGRESQL__PORT: 5432
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${DB_PASSWORD:-SuperSecurePassword123!}
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__SSL_MODE: "prefer"
+      
+      # Redis
+      AUTHENTIK_REDIS__HOST: redis
+      AUTHENTIK_REDIS__PORT: 6379
+      AUTHENTIK_REDIS__PASSWORD: ${REDIS_PASSWORD:-RedisPassword123!}
+      AUTHENTIK_REDIS__DB: 0
+      
+      # Domain & URLs
+      AUTHENTIK_PRIMARY_DOMAIN: "localhost:9000"
+      AUTHENTIK_LISTEN: "0.0.0.0:9000"
+      AUTHENTIK_LISTEN_HTTPS: "0.0.0.0:9443"
+      AUTHENTIK_INSECURE: "true"  # Only for development
+      
+      # Email (Optional - set for testing)
+      AUTHENTIK_EMAIL__HOST: ${EMAIL_HOST:-smtp.example.com}
+      AUTHENTIK_EMAIL__PORT: ${EMAIL_PORT:-587}
+      AUTHENTIK_EMAIL__USERNAME: ${EMAIL_USER:-user@example.com}
+      AUTHENTIK_EMAIL__PASSWORD: ${EMAIL_PASSWORD:-}
+      AUTHENTIK_EMAIL__USE_TLS: "true"
+      AUTHENTIK_EMAIL__FROM: "noreply@localhost"
+      
+      # Logging
+      AUTHENTIK_LOG_LEVEL: info
+      
+      # Error Reporting (disabled for local)
+      AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
+      
+      # Security
+      AUTHENTIK_SECURE_COOKIES: "false"  # For local development
+      AUTHENTIK_SESSION_COOKIE_SECURE: "false"
+      AUTHENTIK_SESSION_COOKIE_HTTP_ONLY: "true"
+      AUTHENTIK_CSRF_TRUSTED_ORIGINS: "localhost:9000,127.0.0.1:9000"
+    
+    volumes:
+      - ./media:/media
+      - ./certs:/certs
+      - ./data:/var/lib/authentik/data
+    ports:
+      - "9000:9000"
+      - "9443:9443"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - portal-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:9000/-/health/live/"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+
+  # Authentik Worker
+  authentik-worker:
+    image: ghcr.io/goauthentik/worker:${AUTHENTIK_VERSION:-latest}
+    container_name: portal-worker
+    restart: always
+    command: worker
+    environment:
+      # Core
+      AUTHENTIK_SECRET_KEY: ${AUTHENTIK_SECRET_KEY:-SuperSecretKey123!Change-In-Production!}
+      AUTHENTIK_POSTGRESQL__HOST: postgres
+      AUTHENTIK_POSTGRESQL__PORT: 5432
+      AUTHENTIK_POSTGRESQL__USER: authentik
+      AUTHENTIK_POSTGRESQL__PASSWORD: ${DB_PASSWORD:-SuperSecurePassword123!}
+      AUTHENTIK_POSTGRESQL__NAME: authentik
+      AUTHENTIK_POSTGRESQL__SSL_MODE: "prefer"
+      
+      # Redis
+      AUTHENTIK_REDIS__HOST: redis
+      AUTHENTIK_REDIS__PORT: 6379
+      AUTHENTIK_REDIS__PASSWORD: ${REDIS_PASSWORD:-RedisPassword123!}
+      AUTHENTIK_REDIS__DB: 0
+      
+      # Logging
+      AUTHENTIK_LOG_LEVEL: info
+      
+      # Error Reporting
+      AUTHENTIK_ERROR_REPORTING__ENABLED: "false"
+    
+    volumes:
+      - ./media:/media
+      - ./certs:/certs
+      - ./data:/var/lib/authentik/data
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - portal-network
+
+  # Adminer (Database Management UI) - Optional
+  adminer:
+    image: adminer:latest
+    container_name: portal-adminer
+    restart: always
+    ports:
+      - "8080:8080"
+    depends_on:
+      - postgres
+    networks:
+      - portal-network
+    environment:
+      ADMINER_DEFAULT_SERVER: postgres
+
+  # Portainer (Docker Management) - Optional
+  portainer:
+    image: portainer/portainer-ce:latest
+    container_name: portal-portainer
+    restart: always
+    ports:
+      - "9001:9000"
+      - "8001:8000"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - portainer-data:/data
+    networks:
+      - portal-network
+
+  # Watchtower (Auto Container Updates) - Optional
+  watchtower:
+    image: containrrr/watchtower:latest
+    container_name: portal-watchtower
+    restart: always
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    command: --interval 300 --cleanup portal-server portal-worker
+    networks:
+      - portal-network
+
+volumes:
+  postgres-data:
+    driver: local
+  redis-data:
+    driver: local
+  portainer-data:
+    driver: local
+
+networks:
+  portal-network:
+    driver: bridge
+
+# Quick Start Instructions:
+# 1. Copy this file to your project root
+# 2. Create .env file with secrets:
+#    AUTHENTIK_SECRET_KEY=<generated-value>
+#    DB_PASSWORD=<generated-value>
+#    REDIS_PASSWORD=<generated-value>
+#    AUTHENTIK_VERSION=latest
+#
+# 3. Start services:
+#    docker-compose -f docker-compose-portal.yaml up -d
+#
+# 4. Access:
+#    - Authentik: http://localhost:9000
+#    - Admin: http://localhost:9000/admin (akadmin/test@test)
+#    - Adminer: http://localhost:8080
+#    - Portainer: http://localhost:9001
+#
+# 5. View logs:
+#    docker-compose -f docker-compose-portal.yaml logs -f
+#
+# 6. Stop services:
+#    docker-compose -f docker-compose-portal.yaml down
+#
+# 7. Reset everything (WARNING - deletes data):
+#    docker-compose -f docker-compose-portal.yaml down -v
